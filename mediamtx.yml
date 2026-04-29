@@ -1,0 +1,11 @@
+# MediaMTX converts RTSP to HLS for browser playback.
+api: yes
+apiAddress: :9997
+hls: yes
+hlsAddress: :8888
+hlsAlwaysRemux: yes
+
+# Accept dynamic proxied paths from query string.
+paths:
+  all_others:
+    source: publisher

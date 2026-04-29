@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Kitten Cam Viewer{% endblock %}
+{% block content %}
+<p>Public live feed page for your cat and kittens.</p>
+<div class="grid">
+  {% for feed in feeds %}
+  <section class="card">
+    <h2>{{ feed['name'] }}</h2>
+    <video controls autoplay muted playsinline id="video-{{ feed['id'] }}"></video>
+    <p class="small">If stream doesn't load, verify RTSP source and MediaMTX logs.</p>
+    <script>
+      (() => {
+        const video = document.getElementById("video-{{ feed['id'] }}");
+        const src = "{{ to_hls_proxy_url(feed['rtsp_url']) }}";
+        if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = src;
+        } else if (Hls.isSupported()) {
+          const hls = new Hls();
+          hls.loadSource(src);
+          hls.attachMedia(video);
+        }
+      })();
+    </script>
+  </section>
+  {% else %}
+  <p>No feeds yet. Add one from Admin.</p>
+  {% endfor %}
+</div>
+{% endblock %}

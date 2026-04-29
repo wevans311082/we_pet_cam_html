@@ -1,0 +1,27 @@
+services:
+  web:
+    build: .
+    container_name: kitten-cam-web
+    environment:
+      SECRET_KEY: "replace-this-secret"
+      ADMIN_USERNAME: "admin"
+      ADMIN_PASSWORD: "replace-this-password"
+      DB_PATH: "/data/feeds.db"
+    volumes:
+      - kitten_data:/data
+    ports:
+      - "8000:8000"
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: kitten-cam-mediamtx
+    restart: unless-stopped
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml
+    command: ["/mediamtx", "/mediamtx.yml"]
+    ports:
+      - "8888:8888"
+      - "9997:9997"
+
+volumes:
+  kitten_data:
