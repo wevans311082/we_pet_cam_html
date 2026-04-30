@@ -182,6 +182,19 @@ def stream_dir(feed_id: int) -> str:
     return os.path.join(app.config["HLS_ROOT"], stream_key(feed_id))
 
 
+def get_feed_rtsp_url(feed_id: int) -> str | None:
+    db = get_db()
+    row = db.execute("SELECT rtsp_url FROM feeds WHERE id = ?", (feed_id,)).fetchone()
+    return row["rtsp_url"] if row else None
+
+
+def ensure_stream_running(feed_id: int, rtsp_url: str) -> bool:
+    proc = STREAM_PROCESSES.get(feed_id)
+    if proc is not None and proc.poll() is None:
+        return True
+    return start_stream(feed_id, rtsp_url)
+
+
 def stop_stream(feed_id: int) -> None:
     proc = STREAM_PROCESSES.pop(feed_id, None)
     if not proc:
@@ -236,8 +249,10 @@ def start_stream(feed_id: int, rtsp_url: str) -> bool:
     try:
         proc = subprocess.Popen(ffmpeg_cmd)
         STREAM_PROCESSES[feed_id] = proc
+        app.logger.info("Started ffmpeg worker for %s", stream_key(feed_id))
         return True
     except OSError:
+        app.logger.exception("Failed to start ffmpeg worker for %s", stream_key(feed_id))
         return False
 
 
@@ -262,7 +277,32 @@ def serve_hls(stream_name: str, filename: str):
         abort(404)
     if not (filename.endswith(".m3u8") or filename.endswith(".ts")):
         abort(404)
+
+    try:
+        feed_id = int(stream_name.split("-", 1)[1])
+    except (IndexError, ValueError):
+        abort(404)
+
     directory = os.path.join(app.config["HLS_ROOT"], stream_name)
+    file_path = os.path.join(directory, filename)
+
+    if filename.endswith(".m3u8") and not os.path.exists(file_path):
+        rtsp_url = get_feed_rtsp_url(feed_id)
+        if not rtsp_url:
+            abort(404)
+
+        if not ensure_stream_running(feed_id, rtsp_url):
+            return "Stream worker failed to start.", 503
+
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            if os.path.exists(file_path):
+                break
+            time.sleep(0.25)
+
+        if not os.path.exists(file_path):
+            return "Stream is starting. Retry in a few seconds.", 503
+
     return send_from_directory(directory, filename)
 
 
