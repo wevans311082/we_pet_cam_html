@@ -207,14 +207,36 @@ def mediamtx_request(method: str, path: str, payload: dict | None = None) -> boo
 def sync_feed_to_mediamtx(stream_path: str, rtsp_url: str) -> bool:
     encoded = quote(stream_path, safe="")
     payload = {"source": rtsp_url, "sourceOnDemand": True}
-    if mediamtx_request("POST", f"/v3/config/paths/add/{encoded}", payload):
-        return True
-    return mediamtx_request("POST", f"/v3/config/paths/edit/{encoded}", payload)
+
+    attempts = [
+        ("POST", f"/v3/config/paths/add/{encoded}"),
+        ("POST", f"/v2/config/paths/add/{encoded}"),
+        ("PATCH", f"/v3/config/paths/add/{encoded}"),
+        ("PATCH", f"/v2/config/paths/add/{encoded}"),
+        ("POST", f"/v3/config/paths/edit/{encoded}"),
+        ("POST", f"/v2/config/paths/edit/{encoded}"),
+        ("PATCH", f"/v3/config/paths/edit/{encoded}"),
+        ("PATCH", f"/v2/config/paths/edit/{encoded}"),
+    ]
+
+    for method, path in attempts:
+        if mediamtx_request(method, path, payload):
+            return True
+
+    app.logger.warning("MediaMTX path sync failed for %s", stream_path)
+    return False
 
 
 def remove_feed_from_mediamtx(stream_path: str) -> None:
     encoded = quote(stream_path, safe="")
-    mediamtx_request("POST", f"/v3/config/paths/remove/{encoded}")
+    for method, path in (
+        ("POST", f"/v3/config/paths/remove/{encoded}"),
+        ("POST", f"/v2/config/paths/remove/{encoded}"),
+        ("DELETE", f"/v3/config/paths/remove/{encoded}"),
+        ("DELETE", f"/v2/config/paths/remove/{encoded}"),
+    ):
+        if mediamtx_request(method, path):
+            return
 
 
 def sync_existing_feeds_to_mediamtx() -> None:
