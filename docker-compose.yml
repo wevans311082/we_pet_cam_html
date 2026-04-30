@@ -1,16 +1,28 @@
 services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: kitten-cam-nginx
+    depends_on:
+      - web
+      - mediamtx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "80:80"
+
   web:
     build: .
     container_name: kitten-cam-web
+    restart: unless-stopped
     environment:
-      SECRET_KEY: "replace-this-secret"
-      ADMIN_USERNAME: "admin"
-      ADMIN_PASSWORD: "replace-this-password"
+      SECRET_KEY: "${SECRET_KEY:?set SECRET_KEY}"
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
+      ADMIN_PASSWORD_HASH: "${ADMIN_PASSWORD_HASH:?set ADMIN_PASSWORD_HASH}"
+      SESSION_COOKIE_SECURE: "true"
       DB_PATH: "/data/feeds.db"
     volumes:
       - kitten_data:/data
-    ports:
-      - "8000:8000"
 
   mediamtx:
     image: bluenviron/mediamtx:latest
@@ -19,9 +31,6 @@ services:
     volumes:
       - ./mediamtx.yml:/mediamtx.yml
     command: ["/mediamtx", "/mediamtx.yml"]
-    ports:
-      - "8888:8888"
-      - "9997:9997"
 
 volumes:
   kitten_data:

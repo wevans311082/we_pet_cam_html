@@ -3,6 +3,7 @@
 {% block content %}
 <h2>Manage RTSP Feeds</h2>
 <form method="post" action="{{ url_for('add_feed') }}" class="form">
+  <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}" />
   <label>Display Name <input name="name" required /></label>
   <label>RTSP URL <input name="rtsp_url" placeholder="rtsp://user:pass@camera:554/stream" required /></label>
   <button type="submit">Add Feed</button>
@@ -14,9 +15,10 @@
   {% for feed in feeds %}
     <tr>
       <td>{{ feed['name'] }}</td>
-      <td class="small">{{ feed['rtsp_url'] }}</td>
+      <td class="small">{{ mask_rtsp_url(feed['rtsp_url']) }}</td>
       <td>
         <form method="post" action="{{ url_for('delete_feed', feed_id=feed['id']) }}">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}" />
           <button class="danger" type="submit">Delete</button>
         </form>
       </td>

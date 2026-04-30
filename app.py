@@ -1,15 +1,44 @@
 import os
 import sqlite3
+import hmac
+import secrets
+import time
+from datetime import timedelta
 from functools import wraps
 from urllib.parse import urlparse
 
-from flask import Flask, flash, g, redirect, render_template, request, session, url_for
+from flask import (
+    Flask,
+    abort,
+    flash,
+    g,
+    redirect,
+    render_template,
+    request,
+    session,
+    url_for,
+)
+from werkzeug.security import check_password_hash
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "change-me-in-production")
 app.config["DB_PATH"] = os.environ.get("DB_PATH", "/data/feeds.db")
 app.config["ADMIN_USERNAME"] = os.environ.get("ADMIN_USERNAME", "admin")
 app.config["ADMIN_PASSWORD"] = os.environ.get("ADMIN_PASSWORD", "change-this-password")
+app.config["ADMIN_PASSWORD_HASH"] = os.environ.get("ADMIN_PASSWORD_HASH", "")
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = (
+    os.environ.get("SESSION_COOKIE_SECURE", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(
+    hours=int(os.environ.get("SESSION_LIFETIME_HOURS", "8"))
+)
+app.config["MAX_LOGIN_ATTEMPTS"] = int(os.environ.get("MAX_LOGIN_ATTEMPTS", "10"))
+app.config["LOGIN_WINDOW_SECONDS"] = int(os.environ.get("LOGIN_WINDOW_SECONDS", "300"))
+
+FAILED_LOGINS = {}
 
 
 def get_db():
@@ -52,6 +81,96 @@ def login_required(fn):
     return wrapper
 
 
+def verify_admin_password(password: str) -> bool:
+    configured_hash = app.config.get("ADMIN_PASSWORD_HASH", "").strip()
+    if configured_hash:
+        try:
+            return check_password_hash(configured_hash, password)
+        except ValueError:
+            return False
+    return hmac.compare_digest(password, app.config["ADMIN_PASSWORD"])
+
+
+def client_ip() -> str:
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def is_login_limited(ip: str) -> bool:
+    now = time.time()
+    window = app.config["LOGIN_WINDOW_SECONDS"]
+    attempts = [t for t in FAILED_LOGINS.get(ip, []) if now - t < window]
+    FAILED_LOGINS[ip] = attempts
+    return len(attempts) >= app.config["MAX_LOGIN_ATTEMPTS"]
+
+
+def record_login_failure(ip: str) -> None:
+    now = time.time()
+    attempts = [t for t in FAILED_LOGINS.get(ip, []) if now - t < app.config["LOGIN_WINDOW_SECONDS"]]
+    attempts.append(now)
+    FAILED_LOGINS[ip] = attempts
+
+
+def clear_login_failures(ip: str) -> None:
+    FAILED_LOGINS.pop(ip, None)
+
+
+def get_csrf_token() -> str:
+    token = session.get("_csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["_csrf_token"] = token
+    return token
+
+
+def validate_csrf_or_abort() -> None:
+    form_token = request.form.get("_csrf_token", "")
+    session_token = session.get("_csrf_token", "")
+    if not form_token or not session_token or not hmac.compare_digest(form_token, session_token):
+        abort(400, description="Invalid CSRF token")
+
+
+def mask_rtsp_url(rtsp_url: str) -> str:
+    parsed = urlparse(rtsp_url)
+    if not parsed.username and not parsed.password:
+        return rtsp_url
+
+    host = parsed.hostname or ""
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+
+    if parsed.username and parsed.password:
+        auth = f"{parsed.username}:***"
+    elif parsed.username:
+        auth = parsed.username
+    else:
+        auth = "***"
+
+    masked_netloc = f"{auth}@{host}" if host else auth
+    return parsed._replace(netloc=masked_netloc).geturl()
+
+
+@app.context_processor
+def inject_template_helpers():
+    return {"csrf_token": get_csrf_token, "mask_rtsp_url": mask_rtsp_url}
+
+
+@app.after_request
+def apply_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Range"
+    response.headers["Access-Control-Expose-Headers"] = "Content-Length, Content-Range, Accept-Ranges"
+    response.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
+    return response
+
+
 def to_hls_proxy_url(rtsp_url: str) -> str:
     # Stream converter endpoint provided by mediamtx.
     return f"/hls_proxy?src={rtsp_url}"
@@ -67,20 +186,32 @@ def index():
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
     if request.method == "POST":
+        validate_csrf_or_abort()
+        ip = client_ip()
+        if is_login_limited(ip):
+            flash("Too many failed attempts. Try again later.", "error")
+            return render_template("login.html"), 429
+
         username = request.form.get("username", "")
         password = request.form.get("password", "")
-        if (
-            username == app.config["ADMIN_USERNAME"]
-            and password == app.config["ADMIN_PASSWORD"]
-        ):
+
+        if username == app.config["ADMIN_USERNAME"] and verify_admin_password(password):
+            clear_login_failures(ip)
+            session.clear()
             session["admin_logged_in"] = True
+            session["_csrf_token"] = secrets.token_urlsafe(32)
+            session.permanent = True
             return redirect(url_for("admin_dashboard"))
+
+        record_login_failure(ip)
         flash("Invalid credentials", "error")
     return render_template("login.html")
 
 
-@app.route("/admin/logout")
+@app.route("/admin/logout", methods=["POST"])
+@login_required
 def admin_logout():
+    validate_csrf_or_abort()
     session.clear()
     return redirect(url_for("index"))
 
@@ -101,6 +232,7 @@ def is_likely_rtsp(url: str) -> bool:
 @app.route("/admin/feeds", methods=["POST"])
 @login_required
 def add_feed():
+    validate_csrf_or_abort()
     name = request.form.get("name", "").strip()
     rtsp_url = request.form.get("rtsp_url", "").strip()
 
@@ -122,6 +254,7 @@ def add_feed():
 @app.route("/admin/feeds/<int:feed_id>/delete", methods=["POST"])
 @login_required
 def delete_feed(feed_id: int):
+    validate_csrf_or_abort()
     db = get_db()
     db.execute("DELETE FROM feeds WHERE id = ?", (feed_id,))
     db.commit()

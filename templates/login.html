@@ -3,6 +3,7 @@
 {% block content %}
 <h2>Admin Login</h2>
 <form method="post" class="form">
+  <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}" />
   <label>Username <input name="username" required /></label>
   <label>Password <input name="password" type="password" required /></label>
   <button type="submit">Login</button>
