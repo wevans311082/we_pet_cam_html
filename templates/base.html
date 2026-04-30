@@ -7,30 +7,30 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   </head>
-  <body>
-    <header>
+  <body class="{% block body_class %}{% endblock %}">
+    {% block topbar %}
+    <header class="site-topbar">
       <h1>🐾 Kitten Cam</h1>
-      <nav>
-        <a href="{{ url_for('index') }}">Viewer</a>
-        <a href="{{ url_for('admin_dashboard') }}">Admin</a>
-        {% if session.get('admin_logged_in') %}
-          <form method="post" action="{{ url_for('admin_logout') }}" class="inline-form">
-            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}" />
-            <button type="submit" class="link-button">Logout</button>
-          </form>
-        {% endif %}
-      </nav>
+      {% if session.get('admin_logged_in') %}
+        <form method="post" action="{{ url_for('admin_logout') }}" class="inline-form">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}" />
+          <button type="submit" class="link-button">Logout</button>
+        </form>
+      {% endif %}
     </header>
-    <main>
+    {% endblock %}
+    <main class="{% block main_class %}{% endblock %}">
+      {% block flash_messages %}
       {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-          <ul class="messages">
-          {% for category, message in messages %}
-            <li class="{{ category }}">{{ message }}</li>
-          {% endfor %}
-          </ul>
-        {% endif %}
+      {% if messages %}
+        <ul class="messages">
+        {% for category, message in messages %}
+          <li class="{{ category }}">{{ message }}</li>
+        {% endfor %}
+        </ul>
+      {% endif %}
       {% endwith %}
+      {% endblock %}
       {% block content %}{% endblock %}
     </main>
   </body>

@@ -1,13 +1,16 @@
 {% extends "base.html" %}
 {% block title %}Kitten Cam Viewer{% endblock %}
+{% block body_class %}viewer-page{% endblock %}
+{% block main_class %}viewer-main{% endblock %}
+{% block topbar %}{% endblock %}
+{% block flash_messages %}{% endblock %}
 {% block content %}
-<section class="kids-banner">
-  <h2>Welcome to kitten watch time</h2>
-  <p>Tap reactions to send love to the cat and kittens.</p>
-</section>
-
-<div class="viewer-fun-controls">
-  <button type="button" id="big-mode-toggle" class="reaction-btn fun-toggle" aria-pressed="false">🧸 Big mode off</button>
+<div id="intro-overlay" class="intro-overlay" aria-hidden="true">
+  <div class="intro-card">
+    <div class="intro-kitty">🐱</div>
+    <h2>Kitten Cam</h2>
+    <p>Watch time is starting</p>
+  </div>
 </div>
 
 <div class="grid">
@@ -32,9 +35,7 @@
       <button type="button" class="reaction-btn reaction-sound-toggle" data-sound-toggle="true" aria-pressed="true">🔊 Sound on</button>
       <button type="button" class="reaction-btn snapshot-btn">📸 Snapshot</button>
     </div>
-    <p class="reaction-stats" id="reaction-stats-{{ feed['id'] }}" aria-live="polite">0 reactions</p>
     <p class="snapshot-note" id="snapshot-note-{{ feed['id'] }}" aria-live="polite"></p>
-    <p class="small">If stream doesn't load, verify RTSP source and ffmpeg logs.</p>
     <script>
       (() => {
         const video = document.getElementById("video-{{ feed['id'] }}");
@@ -62,7 +63,6 @@
 <script>
   (() => {
     const SOUND_KEY = "kittenCamSoundEnabled";
-    const BIG_MODE_KEY = "kittenCamBigMode";
     const confettiEmojis = new Set(["❤️", "🥰"]);
 
     const readSetting = (key, fallback) => {
@@ -90,32 +90,6 @@
         btn.textContent = enabled ? "🔊 Sound on" : "🔈 Sound off";
         btn.setAttribute("aria-pressed", String(enabled));
       });
-    };
-
-    const shouldEnableBigMode = () => {
-      const stored = readSetting(BIG_MODE_KEY, "");
-      if (stored === "1") {
-        return true;
-      }
-      if (stored === "0") {
-        return false;
-      }
-      return window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
-    };
-
-    const syncBigModeButton = (enabled) => {
-      const toggle = document.getElementById("big-mode-toggle");
-      if (!toggle) {
-        return;
-      }
-      toggle.textContent = enabled ? "🧸 Big mode on" : "🧸 Big mode off";
-      toggle.setAttribute("aria-pressed", String(enabled));
-    };
-
-    const setBigMode = (enabled) => {
-      document.body.classList.toggle("big-mode", enabled);
-      writeSetting(BIG_MODE_KEY, enabled ? "1" : "0");
-      syncBigModeButton(enabled);
     };
 
     const applyTimeTheme = () => {
@@ -202,27 +176,6 @@
       window.setTimeout(() => frame.classList.remove("is-pulsing"), 500);
     };
 
-    const updateReactionStats = (card, emoji) => {
-      const stats = card.querySelector(".reaction-stats");
-      if (!stats) {
-        return;
-      }
-
-      const total = Number(card.dataset.reactionTotal || "0") + 1;
-      card.dataset.reactionTotal = String(total);
-
-      const key = `count${emoji}`;
-      const emojiCount = Number(card.dataset[key] || "0") + 1;
-      card.dataset[key] = String(emojiCount);
-
-      const love = Number(card.dataset["count❤️"] || "0");
-      const cute = Number(card.dataset["count🥰"] || "0");
-      const hug = Number(card.dataset["count🤗"] || "0");
-      const like = Number(card.dataset["count👍"] || "0");
-
-      stats.textContent = `${total} reactions · ❤️ ${love} · 🥰 ${cute} · 🤗 ${hug} · 👍 ${like}`;
-    };
-
     const showSnapshotNote = (card, message, isError) => {
       const note = card.querySelector(".snapshot-note");
       if (!note) {
@@ -291,24 +244,14 @@
     };
 
     applyTimeTheme();
-    const firstBigModeState = shouldEnableBigMode();
-    document.body.classList.toggle("big-mode", firstBigModeState);
-    syncBigModeButton(firstBigModeState);
     syncSoundButtons();
 
-    document.querySelectorAll(".card[data-feed-id]").forEach((card) => {
-      card.dataset.reactionTotal = "0";
-      card.dataset["count❤️"] = "0";
-      card.dataset["count🥰"] = "0";
-      card.dataset["count🤗"] = "0";
-      card.dataset["count👍"] = "0";
-    });
-
-    const bigModeToggle = document.getElementById("big-mode-toggle");
-    if (bigModeToggle) {
-      bigModeToggle.addEventListener("click", () => {
-        setBigMode(!document.body.classList.contains("big-mode"));
-      });
+    const introOverlay = document.getElementById("intro-overlay");
+    if (introOverlay) {
+      window.setTimeout(() => {
+        introOverlay.classList.add("is-hidden");
+        window.setTimeout(() => introOverlay.remove(), 620);
+      }, 1900);
     }
 
     document.addEventListener("click", (event) => {
@@ -347,7 +290,6 @@
 
       createFloatingReaction(overlay, emoji);
       pulseCamera(frame);
-      updateReactionStats(card, emoji);
 
       if (confettiEmojis.has(emoji)) {
         launchPawConfetti(overlay);
