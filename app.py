@@ -3,8 +3,12 @@ import sqlite3
 import hmac
 import secrets
 import time
+import json
 from datetime import timedelta
 from functools import wraps
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 
 from flask import (
@@ -24,6 +28,7 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "change-me-in-production
 app.config["DB_PATH"] = os.environ.get("DB_PATH", "/data/feeds.db")
 app.config["ADMIN_USERNAME"] = os.environ.get("ADMIN_USERNAME", "admin")
 app.config["ADMIN_PASSWORD"] = os.environ.get("ADMIN_PASSWORD", "change-this-password")
+app.config["MEDIAMTX_API_URL"] = os.environ.get("MEDIAMTX_API_URL", "http://mediamtx:9997")
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = (
@@ -62,10 +67,25 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             rtsp_url TEXT NOT NULL,
+            stream_path TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+
+    columns = [row["name"] for row in db.execute("PRAGMA table_info(feeds)").fetchall()]
+    if "stream_path" not in columns:
+        db.execute("ALTER TABLE feeds ADD COLUMN stream_path TEXT")
+
+    rows_missing_path = db.execute(
+        "SELECT id FROM feeds WHERE stream_path IS NULL OR TRIM(stream_path) = ''"
+    ).fetchall()
+    for row in rows_missing_path:
+        db.execute(
+            "UPDATE feeds SET stream_path = ? WHERE id = ?",
+            (f"feed-{row['id']}", row["id"]),
+        )
+
     db.commit()
 
 
@@ -163,15 +183,52 @@ def apply_security_headers(response):
     return response
 
 
-def to_hls_proxy_url(rtsp_url: str) -> str:
-    # Stream converter endpoint provided by mediamtx.
-    return f"/hls_proxy?src={rtsp_url}"
+def to_hls_proxy_url(feed: sqlite3.Row) -> str:
+    return f"/hls/{feed['stream_path']}/index.m3u8"
+
+
+def mediamtx_request(method: str, path: str, payload: dict | None = None) -> bool:
+    base = app.config["MEDIAMTX_API_URL"].rstrip("/")
+    url = f"{base}{path}"
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    req = Request(url=url, method=method, data=data, headers=headers)
+    try:
+        with urlopen(req, timeout=5) as response:
+            return 200 <= response.status < 300
+    except (HTTPError, URLError, TimeoutError):
+        return False
+
+
+def sync_feed_to_mediamtx(stream_path: str, rtsp_url: str) -> bool:
+    encoded = quote(stream_path, safe="")
+    payload = {"source": rtsp_url, "sourceOnDemand": True}
+    if mediamtx_request("POST", f"/v3/config/paths/add/{encoded}", payload):
+        return True
+    return mediamtx_request("POST", f"/v3/config/paths/edit/{encoded}", payload)
+
+
+def remove_feed_from_mediamtx(stream_path: str) -> None:
+    encoded = quote(stream_path, safe="")
+    mediamtx_request("POST", f"/v3/config/paths/remove/{encoded}")
+
+
+def sync_existing_feeds_to_mediamtx() -> None:
+    db = get_db()
+    feeds = db.execute("SELECT stream_path, rtsp_url FROM feeds").fetchall()
+    for feed in feeds:
+        if feed["stream_path"]:
+            sync_feed_to_mediamtx(feed["stream_path"], feed["rtsp_url"])
 
 
 @app.route("/")
 def index():
     db = get_db()
-    feeds = db.execute("SELECT id, name, rtsp_url FROM feeds ORDER BY id DESC").fetchall()
+    feeds = db.execute("SELECT id, name, rtsp_url, stream_path FROM feeds ORDER BY id DESC").fetchall()
     return render_template("index.html", feeds=feeds, to_hls_proxy_url=to_hls_proxy_url)
 
 
@@ -237,8 +294,16 @@ def add_feed():
         return redirect(url_for("admin_dashboard"))
 
     db = get_db()
-    db.execute("INSERT INTO feeds (name, rtsp_url) VALUES (?, ?)", (name, rtsp_url))
+    cursor = db.execute("INSERT INTO feeds (name, rtsp_url) VALUES (?, ?)", (name, rtsp_url))
+    feed_id = cursor.lastrowid
+    stream_path = f"feed-{feed_id}"
+    db.execute("UPDATE feeds SET stream_path = ? WHERE id = ?", (stream_path, feed_id))
     db.commit()
+
+    if not sync_feed_to_mediamtx(stream_path, rtsp_url):
+        flash("Feed saved, but stream registration failed. Check MediaMTX logs.", "error")
+        return redirect(url_for("admin_dashboard"))
+
     flash("Feed added.", "success")
     return redirect(url_for("admin_dashboard"))
 
@@ -248,8 +313,11 @@ def add_feed():
 def delete_feed(feed_id: int):
     validate_csrf_or_abort()
     db = get_db()
+    feed = db.execute("SELECT stream_path FROM feeds WHERE id = ?", (feed_id,)).fetchone()
     db.execute("DELETE FROM feeds WHERE id = ?", (feed_id,))
     db.commit()
+    if feed and feed["stream_path"]:
+        remove_feed_from_mediamtx(feed["stream_path"])
     flash("Feed deleted.", "success")
     return redirect(url_for("admin_dashboard"))
 
@@ -257,4 +325,5 @@ def delete_feed(feed_id: int):
 if __name__ == "__main__":
     with app.app_context():
         init_db()
+        sync_existing_feeds_to_mediamtx()
     app.run(host="0.0.0.0", port=8000, debug=False)

@@ -38,7 +38,7 @@
     <script>
       (() => {
         const video = document.getElementById("video-{{ feed['id'] }}");
-        const src = "{{ to_hls_proxy_url(feed['rtsp_url']) }}";
+        const src = "{{ to_hls_proxy_url(feed) }}";
         video.crossOrigin = "anonymous";
         if (video.canPlayType('application/vnd.apple.mpegurl')) {
           video.src = src;
