@@ -15,13 +15,7 @@ Create a `.env` file with strong secrets:
 ```bash
 SECRET_KEY=replace-with-a-long-random-value
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD_HASH=pbkdf2:sha256:600000$...   # generated with Werkzeug
-```
-
-Generate a compatible password hash:
-
-```bash
-python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('your-password'))"
+ADMIN_PASSWORD=choose-a-strong-password
 ```
 
 ```bash
@@ -38,7 +32,7 @@ Admin credentials come from `.env` environment variables.
 - Nginx is included in `docker-compose.yml` and listens on port `80`.
 - Point Cloudflare DNS for `kittens.cyberask.co.uk` to your VM public IP.
 - Keep Cloudflare proxy enabled (orange cloud) and set SSL mode to `Full` (or `Full (strict)` if you later add origin certs).
-- Change `SECRET_KEY` and `ADMIN_PASSWORD_HASH`.
+- Change `SECRET_KEY` and `ADMIN_PASSWORD`.
 - Expose only port `80` to the internet; Flask and MediaMTX stay internal to Docker network.
 
 ## Clean VM quick start

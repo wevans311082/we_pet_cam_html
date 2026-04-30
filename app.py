@@ -18,14 +18,12 @@ from flask import (
     session,
     url_for,
 )
-from werkzeug.security import check_password_hash
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "change-me-in-production")
 app.config["DB_PATH"] = os.environ.get("DB_PATH", "/data/feeds.db")
 app.config["ADMIN_USERNAME"] = os.environ.get("ADMIN_USERNAME", "admin")
 app.config["ADMIN_PASSWORD"] = os.environ.get("ADMIN_PASSWORD", "change-this-password")
-app.config["ADMIN_PASSWORD_HASH"] = os.environ.get("ADMIN_PASSWORD_HASH", "")
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = (
@@ -82,12 +80,6 @@ def login_required(fn):
 
 
 def verify_admin_password(password: str) -> bool:
-    configured_hash = app.config.get("ADMIN_PASSWORD_HASH", "").strip()
-    if configured_hash:
-        try:
-            return check_password_hash(configured_hash, password)
-        except ValueError:
-            return False
     return hmac.compare_digest(password, app.config["ADMIN_PASSWORD"])
 
 

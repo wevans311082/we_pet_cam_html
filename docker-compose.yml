@@ -18,7 +18,7 @@ services:
     environment:
       SECRET_KEY: "${SECRET_KEY:?set SECRET_KEY}"
       ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
-      ADMIN_PASSWORD_HASH: "${ADMIN_PASSWORD_HASH:?set ADMIN_PASSWORD_HASH}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?set ADMIN_PASSWORD}"
       SESSION_COOKIE_SECURE: "true"
       DB_PATH: "/data/feeds.db"
     volumes:
