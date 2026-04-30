@@ -30,7 +30,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./mediamtx.yml:/mediamtx.yml
-    command: ["/mediamtx", "/mediamtx.yml"]
+    command: ["/mediamtx.yml"]
 
 volumes:
   kitten_data:
