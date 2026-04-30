@@ -4,7 +4,6 @@ services:
     container_name: kitten-cam-nginx
     depends_on:
       - web
-      - mediamtx
     restart: unless-stopped
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
@@ -21,16 +20,9 @@ services:
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:?set ADMIN_PASSWORD}"
       SESSION_COOKIE_SECURE: "true"
       DB_PATH: "/data/feeds.db"
+      HLS_ROOT: "/data/hls"
     volumes:
       - kitten_data:/data
-
-  mediamtx:
-    image: bluenviron/mediamtx:latest
-    container_name: kitten-cam-mediamtx
-    restart: unless-stopped
-    volumes:
-      - ./mediamtx.yml:/mediamtx.yml
-    command: ["/mediamtx.yml"]
 
 volumes:
   kitten_data:

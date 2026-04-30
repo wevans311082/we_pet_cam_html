@@ -3,12 +3,10 @@ import sqlite3
 import hmac
 import secrets
 import time
-import json
+import shutil
+import subprocess
 from datetime import timedelta
 from functools import wraps
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 
 from flask import (
@@ -19,6 +17,7 @@ from flask import (
     redirect,
     render_template,
     request,
+    send_from_directory,
     session,
     url_for,
 )
@@ -28,7 +27,8 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "change-me-in-production
 app.config["DB_PATH"] = os.environ.get("DB_PATH", "/data/feeds.db")
 app.config["ADMIN_USERNAME"] = os.environ.get("ADMIN_USERNAME", "admin")
 app.config["ADMIN_PASSWORD"] = os.environ.get("ADMIN_PASSWORD", "change-this-password")
-app.config["MEDIAMTX_API_URL"] = os.environ.get("MEDIAMTX_API_URL", "http://mediamtx:9997")
+app.config["HLS_ROOT"] = os.environ.get("HLS_ROOT", "/data/hls")
+app.config["FFMPEG_BIN"] = os.environ.get("FFMPEG_BIN", "ffmpeg")
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = (
@@ -42,6 +42,7 @@ app.config["MAX_LOGIN_ATTEMPTS"] = int(os.environ.get("MAX_LOGIN_ATTEMPTS", "10"
 app.config["LOGIN_WINDOW_SECONDS"] = int(os.environ.get("LOGIN_WINDOW_SECONDS", "300"))
 
 FAILED_LOGINS = {}
+STREAM_PROCESSES = {}
 
 
 def get_db():
@@ -67,24 +68,10 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             rtsp_url TEXT NOT NULL,
-            stream_path TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
-
-    columns = [row["name"] for row in db.execute("PRAGMA table_info(feeds)").fetchall()]
-    if "stream_path" not in columns:
-        db.execute("ALTER TABLE feeds ADD COLUMN stream_path TEXT")
-
-    rows_missing_path = db.execute(
-        "SELECT id FROM feeds WHERE stream_path IS NULL OR TRIM(stream_path) = ''"
-    ).fetchall()
-    for row in rows_missing_path:
-        db.execute(
-            "UPDATE feeds SET stream_path = ? WHERE id = ?",
-            (f"feed-{row['id']}", row["id"]),
-        )
 
     db.commit()
 
@@ -184,74 +171,99 @@ def apply_security_headers(response):
 
 
 def to_hls_proxy_url(feed: sqlite3.Row) -> str:
-    return f"/hls/{feed['stream_path']}/index.m3u8"
+    return f"/hls/feed-{feed['id']}/index.m3u8"
 
 
-def mediamtx_request(method: str, path: str, payload: dict | None = None) -> bool:
-    base = app.config["MEDIAMTX_API_URL"].rstrip("/")
-    url = f"{base}{path}"
-    data = None
-    headers = {}
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
+def stream_key(feed_id: int) -> str:
+    return f"feed-{feed_id}"
 
-    req = Request(url=url, method=method, data=data, headers=headers)
+
+def stream_dir(feed_id: int) -> str:
+    return os.path.join(app.config["HLS_ROOT"], stream_key(feed_id))
+
+
+def stop_stream(feed_id: int) -> None:
+    proc = STREAM_PROCESSES.pop(feed_id, None)
+    if not proc:
+        return
+
     try:
-        with urlopen(req, timeout=5) as response:
-            return 200 <= response.status < 300
-    except (HTTPError, URLError, TimeoutError):
+        proc.terminate()
+        proc.wait(timeout=3)
+    except Exception:
+        proc.kill()
+
+
+def start_stream(feed_id: int, rtsp_url: str) -> bool:
+    stop_stream(feed_id)
+
+    output_dir = stream_dir(feed_id)
+    os.makedirs(output_dir, exist_ok=True)
+    for filename in os.listdir(output_dir):
+        path = os.path.join(output_dir, filename)
+        if os.path.isfile(path):
+            os.remove(path)
+
+    ffmpeg_cmd = [
+        app.config["FFMPEG_BIN"],
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-rtsp_transport",
+        "tcp",
+        "-i",
+        rtsp_url,
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-tune",
+        "zerolatency",
+        "-f",
+        "hls",
+        "-hls_time",
+        "2",
+        "-hls_list_size",
+        "6",
+        "-hls_flags",
+        "delete_segments+append_list+omit_endlist+independent_segments",
+        "-hls_segment_filename",
+        os.path.join(output_dir, "seg_%05d.ts"),
+        os.path.join(output_dir, "index.m3u8"),
+    ]
+
+    try:
+        proc = subprocess.Popen(ffmpeg_cmd)
+        STREAM_PROCESSES[feed_id] = proc
+        return True
+    except OSError:
         return False
 
 
-def sync_feed_to_mediamtx(stream_path: str, rtsp_url: str) -> bool:
-    encoded = quote(stream_path, safe="")
-    payload = {"source": rtsp_url, "sourceOnDemand": True}
-
-    attempts = [
-        ("POST", f"/v3/config/paths/add/{encoded}"),
-        ("POST", f"/v2/config/paths/add/{encoded}"),
-        ("PATCH", f"/v3/config/paths/add/{encoded}"),
-        ("PATCH", f"/v2/config/paths/add/{encoded}"),
-        ("POST", f"/v3/config/paths/edit/{encoded}"),
-        ("POST", f"/v2/config/paths/edit/{encoded}"),
-        ("PATCH", f"/v3/config/paths/edit/{encoded}"),
-        ("PATCH", f"/v2/config/paths/edit/{encoded}"),
-    ]
-
-    for method, path in attempts:
-        if mediamtx_request(method, path, payload):
-            return True
-
-    app.logger.warning("MediaMTX path sync failed for %s", stream_path)
-    return False
-
-
-def remove_feed_from_mediamtx(stream_path: str) -> None:
-    encoded = quote(stream_path, safe="")
-    for method, path in (
-        ("POST", f"/v3/config/paths/remove/{encoded}"),
-        ("POST", f"/v2/config/paths/remove/{encoded}"),
-        ("DELETE", f"/v3/config/paths/remove/{encoded}"),
-        ("DELETE", f"/v2/config/paths/remove/{encoded}"),
-    ):
-        if mediamtx_request(method, path):
-            return
-
-
-def sync_existing_feeds_to_mediamtx() -> None:
+def start_all_streams() -> None:
     db = get_db()
-    feeds = db.execute("SELECT stream_path, rtsp_url FROM feeds").fetchall()
+    feeds = db.execute("SELECT id, rtsp_url FROM feeds").fetchall()
+    os.makedirs(app.config["HLS_ROOT"], exist_ok=True)
     for feed in feeds:
-        if feed["stream_path"]:
-            sync_feed_to_mediamtx(feed["stream_path"], feed["rtsp_url"])
+        start_stream(feed["id"], feed["rtsp_url"])
 
 
 @app.route("/")
 def index():
     db = get_db()
-    feeds = db.execute("SELECT id, name, rtsp_url, stream_path FROM feeds ORDER BY id DESC").fetchall()
+    feeds = db.execute("SELECT id, name, rtsp_url FROM feeds ORDER BY id DESC").fetchall()
     return render_template("index.html", feeds=feeds, to_hls_proxy_url=to_hls_proxy_url)
+
+
+@app.route("/hls/<stream_name>/<path:filename>")
+def serve_hls(stream_name: str, filename: str):
+    if not stream_name.startswith("feed-"):
+        abort(404)
+    if not (filename.endswith(".m3u8") or filename.endswith(".ts")):
+        abort(404)
+    directory = os.path.join(app.config["HLS_ROOT"], stream_name)
+    return send_from_directory(directory, filename)
 
 
 @app.route("/admin/login", methods=["GET", "POST"])
@@ -317,13 +329,11 @@ def add_feed():
 
     db = get_db()
     cursor = db.execute("INSERT INTO feeds (name, rtsp_url) VALUES (?, ?)", (name, rtsp_url))
-    feed_id = cursor.lastrowid
-    stream_path = f"feed-{feed_id}"
-    db.execute("UPDATE feeds SET stream_path = ? WHERE id = ?", (stream_path, feed_id))
     db.commit()
+    feed_id = cursor.lastrowid
 
-    if not sync_feed_to_mediamtx(stream_path, rtsp_url):
-        flash("Feed saved, but stream registration failed. Check MediaMTX logs.", "error")
+    if not start_stream(feed_id, rtsp_url):
+        flash("Feed saved, but stream worker failed to start. Check ffmpeg is installed.", "error")
         return redirect(url_for("admin_dashboard"))
 
     flash("Feed added.", "success")
@@ -335,11 +345,10 @@ def add_feed():
 def delete_feed(feed_id: int):
     validate_csrf_or_abort()
     db = get_db()
-    feed = db.execute("SELECT stream_path FROM feeds WHERE id = ?", (feed_id,)).fetchone()
     db.execute("DELETE FROM feeds WHERE id = ?", (feed_id,))
     db.commit()
-    if feed and feed["stream_path"]:
-        remove_feed_from_mediamtx(feed["stream_path"])
+    stop_stream(feed_id)
+    shutil.rmtree(stream_dir(feed_id), ignore_errors=True)
     flash("Feed deleted.", "success")
     return redirect(url_for("admin_dashboard"))
 
@@ -347,5 +356,5 @@ def delete_feed(feed_id: int):
 if __name__ == "__main__":
     with app.app_context():
         init_db()
-        sync_existing_feeds_to_mediamtx()
+        start_all_streams()
     app.run(host="0.0.0.0", port=8000, debug=False)

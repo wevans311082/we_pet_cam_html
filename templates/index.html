@@ -34,7 +34,7 @@
     </div>
     <p class="reaction-stats" id="reaction-stats-{{ feed['id'] }}" aria-live="polite">0 reactions</p>
     <p class="snapshot-note" id="snapshot-note-{{ feed['id'] }}" aria-live="polite"></p>
-    <p class="small">If stream doesn't load, verify RTSP source and MediaMTX logs.</p>
+    <p class="small">If stream doesn't load, verify RTSP source and ffmpeg logs.</p>
     <script>
       (() => {
         const video = document.getElementById("video-{{ feed['id'] }}");
