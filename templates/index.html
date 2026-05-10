@@ -32,6 +32,14 @@
       <button type="button" class="reaction-btn" data-emoji="🥰" data-label="Cute">🥰 Cute</button>
       <button type="button" class="reaction-btn" data-emoji="🤗" data-label="Hug">🤗 Hug</button>
       <button type="button" class="reaction-btn" data-emoji="👍" data-label="Like">👍 Like</button>
+      <button
+        type="button"
+        class="reaction-btn blue-filter-toggle{% if feed['remove_blue'] %} is-active{% endif %}"
+        data-blue-filter-toggle="true"
+        data-feed-id="{{ feed['id'] }}"
+        data-enabled="{% if feed['remove_blue'] %}1{% else %}0{% endif %}"
+        aria-pressed="{% if feed['remove_blue'] %}true{% else %}false{% endif %}"
+      >{% if feed['remove_blue'] %}🟢 Blue cut on{% else %}🔵 Blue cut off{% endif %}</button>
       <button type="button" class="reaction-btn reaction-sound-toggle" data-sound-toggle="true" aria-pressed="true">🔊 Sound on</button>
       <button type="button" class="reaction-btn snapshot-btn">📸 Snapshot</button>
     </div>
@@ -62,6 +70,7 @@
 
 <script>
   (() => {
+    const csrfToken = "{{ csrf_token() }}";
     const SOUND_KEY = "kittenCamSoundEnabled";
     const confettiEmojis = new Set(["❤️", "🥰"]);
 
@@ -243,6 +252,71 @@
       );
     };
 
+    const updateBlueFilterButton = (button, enabled) => {
+      button.dataset.enabled = enabled ? "1" : "0";
+      button.setAttribute("aria-pressed", String(enabled));
+      button.classList.toggle("is-active", enabled);
+      button.textContent = enabled ? "🟢 Blue cut on" : "🔵 Blue cut off";
+    };
+
+    const refreshVideoStream = (card) => {
+      const video = card.querySelector("video");
+      if (!video) {
+        return;
+      }
+
+      const current = video.currentSrc || video.src;
+      if (!current) {
+        return;
+      }
+
+      const separator = current.includes("?") ? "&" : "?";
+      const refreshed = `${current}${separator}v=${Date.now()}`;
+
+      video.pause();
+      video.src = refreshed;
+      video.load();
+      video.play().catch(() => {});
+    };
+
+    const toggleBlueFilter = async (button, card) => {
+      const feedId = button.dataset.feedId || card.dataset.feedId;
+      if (!feedId) {
+        return;
+      }
+
+      const shouldEnable = button.dataset.enabled !== "1";
+      button.disabled = true;
+
+      try {
+        const response = await fetch(`/feeds/${feedId}/blue-filter`, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+          },
+          body: new URLSearchParams({
+            _csrf_token: csrfToken,
+            enabled: shouldEnable ? "1" : "0",
+          }),
+        });
+
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload.ok) {
+          showSnapshotNote(card, payload.error || "Could not update blue filter.", true);
+          return;
+        }
+
+        updateBlueFilterButton(button, Boolean(payload.remove_blue));
+        refreshVideoStream(card);
+        showSnapshotNote(card, payload.remove_blue ? "Blue removed from stream." : "Blue channel restored.", false);
+      } catch (_err) {
+        showSnapshotNote(card, "Network error while changing blue filter.", true);
+      } finally {
+        button.disabled = false;
+      }
+    };
+
     applyTimeTheme();
     syncSoundButtons();
 
@@ -268,6 +342,11 @@
 
       const card = button.closest(".card[data-feed-id]");
       if (!card) {
+        return;
+      }
+
+      if (button.dataset.blueFilterToggle === "true") {
+        toggleBlueFilter(button, card);
         return;
       }
 

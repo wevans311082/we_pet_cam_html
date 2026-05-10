@@ -14,6 +14,7 @@ from flask import (
     abort,
     flash,
     g,
+    jsonify,
     redirect,
     render_template,
     request,
@@ -68,10 +69,18 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             rtsp_url TEXT NOT NULL,
+            remove_blue INTEGER NOT NULL DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+
+    columns = {
+        row["name"]
+        for row in db.execute("PRAGMA table_info(feeds)").fetchall()
+    }
+    if "remove_blue" not in columns:
+        db.execute("ALTER TABLE feeds ADD COLUMN remove_blue INTEGER NOT NULL DEFAULT 0")
 
     db.commit()
 
@@ -226,6 +235,17 @@ def start_stream(feed_id: int, rtsp_url: str) -> bool:
         "tcp",
         "-i",
         rtsp_url,
+    ]
+
+    db = get_db()
+    feed = db.execute("SELECT remove_blue FROM feeds WHERE id = ?", (feed_id,)).fetchone()
+    remove_blue = bool(feed and feed["remove_blue"])
+
+    if remove_blue:
+        # Zero out the blue output channel.
+        ffmpeg_cmd.extend(["-vf", "colorchannelmixer=bb=0"])
+
+    ffmpeg_cmd.extend([
         "-an",
         "-c:v",
         "libx264",
@@ -244,7 +264,7 @@ def start_stream(feed_id: int, rtsp_url: str) -> bool:
         "-hls_segment_filename",
         os.path.join(output_dir, "seg_%05d.ts"),
         os.path.join(output_dir, "index.m3u8"),
-    ]
+    ])
 
     try:
         proc = subprocess.Popen(ffmpeg_cmd)
@@ -267,7 +287,7 @@ def start_all_streams() -> None:
 @app.route("/")
 def index():
     db = get_db()
-    feeds = db.execute("SELECT id, name, rtsp_url FROM feeds ORDER BY id DESC").fetchall()
+    feeds = db.execute("SELECT id, name, rtsp_url, remove_blue FROM feeds ORDER BY id DESC").fetchall()
     return render_template("index.html", feeds=feeds, to_hls_proxy_url=to_hls_proxy_url)
 
 
@@ -343,7 +363,7 @@ def admin_logout():
 @login_required
 def admin_dashboard():
     db = get_db()
-    feeds = db.execute("SELECT id, name, rtsp_url FROM feeds ORDER BY id DESC").fetchall()
+    feeds = db.execute("SELECT id, name, rtsp_url, remove_blue FROM feeds ORDER BY id DESC").fetchall()
     return render_template("admin.html", feeds=feeds)
 
 
@@ -390,6 +410,33 @@ def delete_feed(feed_id: int):
     stop_stream(feed_id)
     shutil.rmtree(stream_dir(feed_id), ignore_errors=True)
     flash("Feed deleted.", "success")
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/feeds/<int:feed_id>/blue-filter", methods=["POST"])
+def toggle_blue_filter(feed_id: int):
+    validate_csrf_or_abort()
+    wants_json = "application/json" in request.headers.get("Accept", "")
+    enabled = request.form.get("enabled", "").strip().lower() in ("1", "true", "on", "yes")
+
+    db = get_db()
+    feed = db.execute("SELECT id, rtsp_url FROM feeds WHERE id = ?", (feed_id,)).fetchone()
+    if not feed:
+        abort(404)
+
+    db.execute("UPDATE feeds SET remove_blue = ? WHERE id = ?", (1 if enabled else 0, feed_id))
+    db.commit()
+
+    if not start_stream(feed_id, feed["rtsp_url"]):
+        if wants_json:
+            return jsonify({"ok": False, "error": "Failed to restart stream worker."}), 503
+        flash("Could not restart stream worker.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    if wants_json:
+        return jsonify({"ok": True, "remove_blue": enabled})
+
+    flash("Blue filter enabled." if enabled else "Blue filter disabled.", "success")
     return redirect(url_for("admin_dashboard"))
 
 

@@ -10,12 +10,19 @@
 </form>
 
 <table>
-  <thead><tr><th>Name</th><th>RTSP URL</th><th></th></tr></thead>
+  <thead><tr><th>Name</th><th>RTSP URL</th><th>Blue Filter</th><th></th></tr></thead>
   <tbody>
   {% for feed in feeds %}
     <tr>
       <td>{{ feed['name'] }}</td>
       <td class="small">{{ mask_rtsp_url(feed['rtsp_url']) }}</td>
+      <td>
+        <form method="post" action="{{ url_for('toggle_blue_filter', feed_id=feed['id']) }}">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="enabled" value="{% if feed['remove_blue'] %}0{% else %}1{% endif %}" />
+          <button type="submit">{% if feed['remove_blue'] %}Disable{% else %}Enable{% endif %}</button>
+        </form>
+      </td>
       <td>
         <form method="post" action="{{ url_for('delete_feed', feed_id=feed['id']) }}">
           <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}" />

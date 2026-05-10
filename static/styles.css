@@ -186,6 +186,19 @@ body.theme-night .bedtime-sparkles { display: block; }
 	border-color: #7ed5c5;
 	font-weight: 600;
 }
+.blue-filter-toggle {
+	background: #eef6ff;
+	border-color: #92b8eb;
+	font-weight: 600;
+}
+.blue-filter-toggle.is-active {
+	background: #e9ffe9;
+	border-color: #79cc79;
+}
+.blue-filter-toggle:disabled {
+	opacity: .65;
+	cursor: wait;
+}
 .snapshot-note {
 	min-height: 1.2rem;
 	margin: .45rem 0 .2rem;
