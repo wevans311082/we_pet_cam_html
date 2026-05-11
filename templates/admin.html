@@ -10,7 +10,7 @@
 </form>
 
 <table>
-  <thead><tr><th>Name</th><th>RTSP URL</th><th>Blue Filter</th><th></th></tr></thead>
+  <thead><tr><th>Name</th><th>RTSP URL</th><th>Blue Filter</th><th>Show Filter</th><th></th></tr></thead>
   <tbody>
   {% for feed in feeds %}
     <tr>
@@ -24,12 +24,48 @@
         </form>
       </td>
       <td>
+        <form method="post" action="{{ url_for('toggle_show_blue_filter', feed_id=feed['id']) }}">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="enabled" value="{% if feed['show_blue_filter'] %}0{% else %}1{% endif %}" />
+          <button type="submit">{% if feed['show_blue_filter'] %}Hide{% else %}Show{% endif %}</button>
+        </form>
+      </td>
+      <td>
         <form method="post" action="{{ url_for('delete_feed', feed_id=feed['id']) }}">
           <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}" />
           <button class="danger" type="submit">Delete</button>
         </form>
       </td>
     </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Manage Kitten Profiles</h2>
+<form method="post" action="{{ url_for('add_kitten') }}" class="form" enctype="multipart/form-data">
+  <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}" />
+  <label>Kitten Name <input name="name" maxlength="60" required /></label>
+  <label>Kitten Photo <input type="file" name="image" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" required /></label>
+  <button type="submit">Save Kitten</button>
+  <p class="small">Up to {{ max_kittens }} kittens total.</p>
+</form>
+
+<table>
+  <thead><tr><th>Photo</th><th>Name</th><th></th></tr></thead>
+  <tbody>
+  {% for kitten in kittens %}
+    <tr>
+      <td><img src="{{ url_for('serve_kitten_image', filename=kitten['image_filename']) }}" alt="{{ kitten['name'] }}" class="admin-kitten-thumb" /></td>
+      <td>{{ kitten['name'] }}</td>
+      <td>
+        <form method="post" action="{{ url_for('delete_kitten', kitten_id=kitten['id']) }}">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}" />
+          <button class="danger" type="submit">Delete</button>
+        </form>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="3">No kitten profiles yet.</td></tr>
   {% endfor %}
   </tbody>
 </table>

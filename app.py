@@ -8,6 +8,7 @@ import subprocess
 from datetime import timedelta
 from functools import wraps
 from urllib.parse import urlparse
+from werkzeug.utils import secure_filename
 
 from flask import (
     Flask,
@@ -29,6 +30,7 @@ app.config["DB_PATH"] = os.environ.get("DB_PATH", "/data/feeds.db")
 app.config["ADMIN_USERNAME"] = os.environ.get("ADMIN_USERNAME", "admin")
 app.config["ADMIN_PASSWORD"] = os.environ.get("ADMIN_PASSWORD", "change-this-password")
 app.config["HLS_ROOT"] = os.environ.get("HLS_ROOT", "/data/hls")
+app.config["KITTEN_UPLOAD_ROOT"] = os.environ.get("KITTEN_UPLOAD_ROOT", "/data/kittens")
 app.config["FFMPEG_BIN"] = os.environ.get("FFMPEG_BIN", "ffmpeg")
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -41,6 +43,9 @@ app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(
 )
 app.config["MAX_LOGIN_ATTEMPTS"] = int(os.environ.get("MAX_LOGIN_ATTEMPTS", "10"))
 app.config["LOGIN_WINDOW_SECONDS"] = int(os.environ.get("LOGIN_WINDOW_SECONDS", "300"))
+app.config["MAX_KITTENS"] = int(os.environ.get("MAX_KITTENS", "5"))
+
+ALLOWED_KITTEN_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 FAILED_LOGINS = {}
 STREAM_PROCESSES = {}
@@ -70,6 +75,7 @@ def init_db():
             name TEXT NOT NULL,
             rtsp_url TEXT NOT NULL,
             remove_blue INTEGER NOT NULL DEFAULT 0,
+            show_blue_filter INTEGER NOT NULL DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
@@ -81,6 +87,21 @@ def init_db():
     }
     if "remove_blue" not in columns:
         db.execute("ALTER TABLE feeds ADD COLUMN remove_blue INTEGER NOT NULL DEFAULT 0")
+    if "show_blue_filter" not in columns:
+        db.execute("ALTER TABLE feeds ADD COLUMN show_blue_filter INTEGER NOT NULL DEFAULT 0")
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS kittens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            image_filename TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    os.makedirs(app.config["KITTEN_UPLOAD_ROOT"], exist_ok=True)
 
     db.commit()
 
@@ -181,6 +202,24 @@ def apply_security_headers(response):
 
 def to_hls_proxy_url(feed: sqlite3.Row) -> str:
     return f"/hls/feed-{feed['id']}/index.m3u8"
+
+
+def kitten_upload_dir() -> str:
+    return app.config["KITTEN_UPLOAD_ROOT"]
+
+
+def is_allowed_kitten_image(filename: str) -> bool:
+    _root, ext = os.path.splitext(filename)
+    return ext.lower() in ALLOWED_KITTEN_IMAGE_EXTENSIONS
+
+
+def delete_kitten_image(image_filename: str) -> None:
+    path = os.path.join(kitten_upload_dir(), image_filename)
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        app.logger.warning("Failed to delete kitten image %s", image_filename)
 
 
 def stream_key(feed_id: int) -> str:
@@ -287,8 +326,14 @@ def start_all_streams() -> None:
 @app.route("/")
 def index():
     db = get_db()
-    feeds = db.execute("SELECT id, name, rtsp_url, remove_blue FROM feeds ORDER BY id DESC").fetchall()
-    return render_template("index.html", feeds=feeds, to_hls_proxy_url=to_hls_proxy_url)
+    feeds = db.execute("SELECT id, name, rtsp_url, remove_blue, show_blue_filter FROM feeds ORDER BY id DESC").fetchall()
+    kittens = db.execute("SELECT id, name, image_filename FROM kittens ORDER BY id ASC").fetchall()
+    return render_template("index.html", feeds=feeds, kittens=kittens, to_hls_proxy_url=to_hls_proxy_url)
+
+
+@app.route("/kittens/<path:filename>")
+def serve_kitten_image(filename: str):
+    return send_from_directory(kitten_upload_dir(), filename)
 
 
 @app.route("/hls/<stream_name>/<path:filename>")
@@ -363,8 +408,9 @@ def admin_logout():
 @login_required
 def admin_dashboard():
     db = get_db()
-    feeds = db.execute("SELECT id, name, rtsp_url, remove_blue FROM feeds ORDER BY id DESC").fetchall()
-    return render_template("admin.html", feeds=feeds)
+    feeds = db.execute("SELECT id, name, rtsp_url, remove_blue, show_blue_filter FROM feeds ORDER BY id DESC").fetchall()
+    kittens = db.execute("SELECT id, name, image_filename FROM kittens ORDER BY id ASC").fetchall()
+    return render_template("admin.html", feeds=feeds, kittens=kittens, max_kittens=app.config["MAX_KITTENS"])
 
 
 def is_likely_rtsp(url: str) -> bool:
@@ -400,6 +446,44 @@ def add_feed():
     return redirect(url_for("admin_dashboard"))
 
 
+@app.route("/admin/kittens", methods=["POST"])
+@login_required
+def add_kitten():
+    validate_csrf_or_abort()
+    name = request.form.get("name", "").strip()
+    image = request.files.get("image")
+
+    if not name or image is None or not image.filename:
+        flash("Kitten name and image are required.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    db = get_db()
+    kitten_count = db.execute("SELECT COUNT(*) AS total FROM kittens").fetchone()["total"]
+    if kitten_count >= app.config["MAX_KITTENS"]:
+        flash(f"You can only add up to {app.config['MAX_KITTENS']} kittens.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    original_filename = secure_filename(image.filename)
+    if not original_filename or not is_allowed_kitten_image(original_filename):
+        flash("Image must be one of: .jpg, .jpeg, .png, .webp", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    _base, ext = os.path.splitext(original_filename)
+    stored_name = f"kitten-{secrets.token_urlsafe(10)}{ext.lower()}"
+    save_path = os.path.join(kitten_upload_dir(), stored_name)
+
+    try:
+        image.save(save_path)
+    except OSError:
+        flash("Could not save kitten image.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    db.execute("INSERT INTO kittens (name, image_filename) VALUES (?, ?)", (name, stored_name))
+    db.commit()
+    flash("Kitten profile added.", "success")
+    return redirect(url_for("admin_dashboard"))
+
+
 @app.route("/admin/feeds/<int:feed_id>/delete", methods=["POST"])
 @login_required
 def delete_feed(feed_id: int):
@@ -410,6 +494,22 @@ def delete_feed(feed_id: int):
     stop_stream(feed_id)
     shutil.rmtree(stream_dir(feed_id), ignore_errors=True)
     flash("Feed deleted.", "success")
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/admin/kittens/<int:kitten_id>/delete", methods=["POST"])
+@login_required
+def delete_kitten(kitten_id: int):
+    validate_csrf_or_abort()
+    db = get_db()
+    kitten = db.execute("SELECT image_filename FROM kittens WHERE id = ?", (kitten_id,)).fetchone()
+    if not kitten:
+        abort(404)
+
+    db.execute("DELETE FROM kittens WHERE id = ?", (kitten_id,))
+    db.commit()
+    delete_kitten_image(kitten["image_filename"])
+    flash("Kitten profile deleted.", "success")
     return redirect(url_for("admin_dashboard"))
 
 
@@ -437,6 +537,24 @@ def toggle_blue_filter(feed_id: int):
         return jsonify({"ok": True, "remove_blue": enabled})
 
     flash("Blue filter enabled." if enabled else "Blue filter disabled.", "success")
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/admin/feeds/<int:feed_id>/show-blue-filter", methods=["POST"])
+@login_required
+def toggle_show_blue_filter(feed_id: int):
+    validate_csrf_or_abort()
+    enabled = request.form.get("enabled", "").strip().lower() in ("1", "true", "on", "yes")
+
+    db = get_db()
+    feed = db.execute("SELECT id FROM feeds WHERE id = ?", (feed_id,)).fetchone()
+    if not feed:
+        abort(404)
+
+    db.execute("UPDATE feeds SET show_blue_filter = ? WHERE id = ?", (1 if enabled else 0, feed_id))
+    db.commit()
+
+    flash("Blue filter button shown." if enabled else "Blue filter button hidden.", "success")
     return redirect(url_for("admin_dashboard"))
 
 

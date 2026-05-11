@@ -13,6 +13,31 @@
   </div>
 </div>
 
+{% if kittens %}
+<div class="viewer-toolbar">
+  <button type="button" class="reaction-btn meet-cuties-btn" data-open-cuties="true">Meet The Cuties</button>
+</div>
+
+<dialog id="cuties-dialog" class="cuties-dialog">
+  <div class="cuties-dialog-shell">
+    <header class="cuties-header">
+      <h2>Meet The Cuties</h2>
+      <button type="button" class="reaction-btn cuties-close-btn" data-close-cuties="true" aria-label="Close">Close</button>
+    </header>
+    <div class="cuties-grid">
+      {% for kitten in kittens %}
+      <article class="cutie-card">
+        <div class="cutie-photo-frame">
+          <img src="{{ url_for('serve_kitten_image', filename=kitten['image_filename']) }}" alt="{{ kitten['name'] }}" loading="lazy" />
+        </div>
+        <h3>{{ kitten['name'] }}</h3>
+      </article>
+      {% endfor %}
+    </div>
+  </div>
+</dialog>
+{% endif %}
+
 <div class="grid">
   {% for feed in feeds %}
   <section class="card" data-feed-id="{{ feed['id'] }}">
@@ -32,6 +57,7 @@
       <button type="button" class="reaction-btn" data-emoji="🥰" data-label="Cute">🥰 Cute</button>
       <button type="button" class="reaction-btn" data-emoji="🤗" data-label="Hug">🤗 Hug</button>
       <button type="button" class="reaction-btn" data-emoji="👍" data-label="Like">👍 Like</button>
+      {% if feed['show_blue_filter'] %}
       <button
         type="button"
         class="reaction-btn blue-filter-toggle{% if feed['remove_blue'] %} is-active{% endif %}"
@@ -40,6 +66,7 @@
         data-enabled="{% if feed['remove_blue'] %}1{% else %}0{% endif %}"
         aria-pressed="{% if feed['remove_blue'] %}true{% else %}false{% endif %}"
       >{% if feed['remove_blue'] %}🟢 Blue cut on{% else %}🔵 Blue cut off{% endif %}</button>
+      {% endif %}
       <button type="button" class="reaction-btn reaction-sound-toggle" data-sound-toggle="true" aria-pressed="true">🔊 Sound on</button>
       <button type="button" class="reaction-btn snapshot-btn">📸 Snapshot</button>
     </div>
@@ -326,6 +353,32 @@
         introOverlay.classList.add("is-hidden");
         window.setTimeout(() => introOverlay.remove(), 620);
       }, 1900);
+    }
+
+    const cutiesDialog = document.getElementById("cuties-dialog");
+    const openCutiesButton = document.querySelector("[data-open-cuties='true']");
+    const closeCutiesButton = document.querySelector("[data-close-cuties='true']");
+
+    if (cutiesDialog && openCutiesButton) {
+      openCutiesButton.addEventListener("click", () => {
+        cutiesDialog.showModal();
+      });
+
+      if (closeCutiesButton) {
+        closeCutiesButton.addEventListener("click", () => cutiesDialog.close());
+      }
+
+      cutiesDialog.addEventListener("click", (event) => {
+        const rect = cutiesDialog.getBoundingClientRect();
+        const clickedOutside =
+          event.clientX < rect.left ||
+          event.clientX > rect.right ||
+          event.clientY < rect.top ||
+          event.clientY > rect.bottom;
+        if (clickedOutside) {
+          cutiesDialog.close();
+        }
+      });
     }
 
     document.addEventListener("click", (event) => {
