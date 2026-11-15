@@ -540,6 +540,36 @@ def toggle_blue_filter(feed_id: int):
     return redirect(url_for("admin_dashboard"))
 
 
+def seed_feed_from_env() -> bool:
+    """Insert SEED_RTSP_URL once, when the feeds table is empty.
+
+    Later boots leave existing rows alone so a redeploy does not rotate a
+    feed an admin has edited. The password is never written to the log.
+    """
+    raw = os.environ.get("SEED_RTSP_URL", "").strip()
+    if not raw:
+        return False
+    if not is_likely_rtsp(raw):
+        app.logger.warning("SEED_RTSP_URL is not an RTSP URL; feed was not seeded")
+        return False
+
+    name = os.environ.get("SEED_FEED_NAME", "Kitten Cam").strip() or "Kitten Cam"
+    db = get_db()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        total = db.execute("SELECT COUNT(*) AS total FROM feeds").fetchone()["total"]
+        if total:
+            db.commit()
+            return False
+        db.execute("INSERT INTO feeds (name, rtsp_url) VALUES (?, ?)", (name, raw))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    app.logger.info("Seeded feed %s", mask_rtsp_url(raw))
+    return True
+
+
 @app.route("/admin/feeds/<int:feed_id>/show-blue-filter", methods=["POST"])
 @login_required
 def toggle_show_blue_filter(feed_id: int):
@@ -561,5 +591,6 @@ def toggle_show_blue_filter(feed_id: int):
 if __name__ == "__main__":
     with app.app_context():
         init_db()
+        seed_feed_from_env()
         start_all_streams()
     app.run(host="0.0.0.0", port=8000, debug=False)
