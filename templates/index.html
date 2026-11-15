@@ -46,7 +46,7 @@
     <span class="sticker-corner bottom-right" aria-hidden="true">🐟</span>
     <h2>{{ feed['name'] }}</h2>
     <div class="camera-frame" data-feed-id="{{ feed['id'] }}">
-      <video controls autoplay muted playsinline id="video-{{ feed['id'] }}"></video>
+      <video controls autoplay muted playsinline id="video-{{ feed['id'] }}" data-feed-src="{{ to_hls_proxy_url(feed) }}"></video>
       <div class="reaction-overlay" id="reaction-overlay-{{ feed['id'] }}" aria-hidden="true"></div>
       <div class="bedtime-sparkles" aria-hidden="true">
         <span>✨</span><span>⭐</span><span>✨</span><span>⭐</span><span>✨</span>
@@ -71,24 +71,6 @@
       <button type="button" class="reaction-btn snapshot-btn">📸 Snapshot</button>
     </div>
     <p class="snapshot-note" id="snapshot-note-{{ feed['id'] }}" aria-live="polite"></p>
-    <script>
-      (() => {
-        const video = document.getElementById("video-{{ feed['id'] }}");
-        const src = "{{ to_hls_proxy_url(feed) }}";
-        video.crossOrigin = "anonymous";
-        if (video.canPlayType('application/vnd.apple.mpegurl')) {
-          video.src = src;
-        } else if (Hls.isSupported()) {
-          const hls = new Hls({
-            xhrSetup: (xhr) => {
-              xhr.withCredentials = false;
-            },
-          });
-          hls.loadSource(src);
-          hls.attachMedia(video);
-        }
-      })();
-    </script>
   </section>
   {% else %}
   <p>No feeds yet. Add one from Admin.</p>
@@ -98,6 +80,86 @@
 <script>
   (() => {
     const csrfToken = "{{ csrf_token() }}";
+    const reconnectEveryMs = 15 * 60 * 1000;
+    const stallReconnectMs = 12 * 1000;
+    const reconnectGapMs = 10 * 1000;
+
+    const reconnectFeed = (video, reason) => {
+      const src = video.dataset.feedSrc;
+      if (!src) {
+        return;
+      }
+      const now = Date.now();
+      if (
+        reason !== "timer" &&
+        video._kittenLastReconnect &&
+        now - video._kittenLastReconnect < reconnectGapMs
+      ) {
+        return;
+      }
+      video._kittenLastReconnect = now;
+      window.clearTimeout(video._kittenStallTimer);
+      if (video._kittenHls) {
+        video._kittenHls.destroy();
+        video._kittenHls = null;
+      }
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      const fresh = `${src.split("?")[0]}?v=${now}`;
+      const playNative = () => {
+        video.src = fresh;
+        video.play().catch(() => {});
+      };
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        playNative();
+        return;
+      }
+      if (window.Hls && Hls.isSupported()) {
+        const hls = new Hls({
+          liveDurationInfinity: true,
+          liveSyncDurationCount: 3,
+          maxLiveSyncPlaybackRate: 1.2,
+          backBufferLength: 30,
+          xhrSetup: (xhr) => {
+            xhr.withCredentials = false;
+          },
+        });
+        hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (data && data.fatal) {
+            reconnectFeed(video, "error");
+          }
+        });
+        hls.loadSource(fresh);
+        hls.attachMedia(video);
+        video._kittenHls = hls;
+        return;
+      }
+      playNative();
+    };
+
+    const watchFeed = (video) => {
+      video.crossOrigin = "anonymous";
+      video.addEventListener("waiting", () => {
+        window.clearTimeout(video._kittenStallTimer);
+        video._kittenStallTimer = window.setTimeout(() => {
+          if (video.readyState < 3) {
+            reconnectFeed(video, "stall");
+          }
+        }, stallReconnectMs);
+      });
+      video.addEventListener("playing", () => {
+        window.clearTimeout(video._kittenStallTimer);
+      });
+      reconnectFeed(video, "timer");
+    };
+
+    document.querySelectorAll("video[data-feed-src]").forEach(watchFeed);
+    window.setInterval(() => {
+      document.querySelectorAll("video[data-feed-src]").forEach((video) => {
+        reconnectFeed(video, "timer");
+      });
+    }, reconnectEveryMs);
     const SOUND_KEY = "kittenCamSoundEnabled";
     const confettiEmojis = new Set(["❤️", "🥰"]);
 
@@ -291,19 +353,7 @@
       if (!video) {
         return;
       }
-
-      const current = video.currentSrc || video.src;
-      if (!current) {
-        return;
-      }
-
-      const separator = current.includes("?") ? "&" : "?";
-      const refreshed = `${current}${separator}v=${Date.now()}`;
-
-      video.pause();
-      video.src = refreshed;
-      video.load();
-      video.play().catch(() => {});
+      reconnectFeed(video, "timer");
     };
 
     const toggleBlueFilter = async (button, card) => {

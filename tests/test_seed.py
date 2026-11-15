@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -77,6 +78,9 @@ class SeedFeedTests(unittest.TestCase):
         self.assertEqual(viewer.status_code, 200)
         self.assertIn("Kitten Cam", viewer_body)
         self.assertIn("/hls/feed-", viewer_body)
+        self.assertIn("data-feed-src", viewer_body)
+        self.assertIn("15 * 60 * 1000", viewer_body)
+        self.assertIn("liveDurationInfinity", viewer_body)
         self.assertNotIn("s3cret-test", viewer_body)
         self.assertNotIn(CAMERA_URL, viewer_body)
 
@@ -157,3 +161,50 @@ class SeedFeedTests(unittest.TestCase):
         self.assertNotIn("s3cret-test", joined)
         self.assertIn("camuser:***@", joined)
         self.assertIn("10.0.20.40", joined)
+
+    def test_restart_clears_cached_segments_and_opens_the_camera_again(self):
+        self._seed()
+        playlist = Path(kitten.app.config["HLS_ROOT"]) / "feed-1"
+        playlist.mkdir(parents=True)
+        (playlist / "seg_00000.ts").write_bytes(b"stale-cache")
+        (playlist / "index.m3u8").write_text("#EXTM3U\n", encoding="utf-8")
+
+        class FakeProc:
+            def __init__(self, *args, **kwargs):
+                self.stderr = io.BytesIO(b"")
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                return None
+
+        with patch("app.subprocess.Popen", FakeProc):
+            with kitten.app.app_context():
+                self.assertEqual(kitten.restart_all_streams(), 1)
+                self.assertFalse((playlist / "seg_00000.ts").exists())
+                self.assertIn(1, kitten.STREAM_PROCESSES)
+                kitten.stop_stream(1)
+
+    def test_restart_timer_fires_once_and_can_be_disabled(self):
+        kitten.app.config["STREAM_RESTART_SECONDS"] = 0
+        with patch.object(kitten, "restart_all_streams") as restart:
+            kitten.stream_restart_loop(threading.Event())
+        restart.assert_not_called()
+
+        kitten.app.config["STREAM_RESTART_SECONDS"] = 0.01
+        stop = threading.Event()
+
+        def stop_after_reconnect():
+            stop.set()
+
+        with patch.object(kitten, "restart_all_streams", side_effect=stop_after_reconnect) as restart:
+            kitten.stream_restart_loop(stop)
+        restart.assert_called_once()
+        kitten.app.config["STREAM_RESTART_SECONDS"] = 900

@@ -51,6 +51,8 @@ ALLOWED_KITTEN_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 FAILED_LOGINS = {}
 STREAM_PROCESSES = {}
+STREAM_LOCK = threading.RLock()
+app.config["STREAM_RESTART_SECONDS"] = int(os.environ.get("STREAM_RESTART_SECONDS", "900"))
 
 
 def get_db():
@@ -254,15 +256,16 @@ def ensure_stream_running(feed_id: int, rtsp_url: str) -> bool:
 
 
 def stop_stream(feed_id: int) -> None:
-    proc = STREAM_PROCESSES.pop(feed_id, None)
-    if not proc:
-        return
+    with STREAM_LOCK:
+        proc = STREAM_PROCESSES.pop(feed_id, None)
+        if not proc:
+            return
 
-    try:
-        proc.terminate()
-        proc.wait(timeout=3)
-    except Exception:
-        proc.kill()
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            proc.kill()
 
 
 def _drain_ffmpeg_stderr(proc: subprocess.Popen, feed_id: int) -> None:
@@ -281,6 +284,11 @@ def _drain_ffmpeg_stderr(proc: subprocess.Popen, feed_id: int) -> None:
 
 
 def start_stream(feed_id: int, rtsp_url: str) -> bool:
+    with STREAM_LOCK:
+        return _start_stream_locked(feed_id, rtsp_url)
+
+
+def _start_stream_locked(feed_id: int, rtsp_url: str) -> bool:
     stop_stream(feed_id)
 
     output_dir = stream_dir(feed_id)
@@ -356,6 +364,47 @@ def start_all_streams() -> None:
     os.makedirs(app.config["HLS_ROOT"], exist_ok=True)
     for feed in feeds:
         start_stream(feed["id"], feed["rtsp_url"])
+
+
+def restart_all_streams() -> int:
+    """Close every camera and open it again.
+
+    The HLS files are removed first, so a browser cannot keep looping the
+    old playlist. The password is not logged.
+    """
+    db = get_db()
+    feeds = db.execute("SELECT id, rtsp_url FROM feeds").fetchall()
+    restarted = 0
+    for feed in feeds:
+        if start_stream(feed["id"], feed["rtsp_url"]):
+            restarted += 1
+    app.logger.info("Reconnected %s camera feed(s)", restarted)
+    return restarted
+
+
+def stream_restart_loop(stop_event: threading.Event) -> None:
+    """Reconnect the cameras on a fixed interval. Zero disables the loop."""
+    interval = float(app.config.get("STREAM_RESTART_SECONDS", 900))
+    if interval <= 0:
+        return
+    while not stop_event.wait(interval):
+        with app.app_context():
+            try:
+                restart_all_streams()
+            except Exception:
+                app.logger.exception("Camera reconnect failed")
+
+
+def start_stream_restart_timer() -> None:
+    interval = int(app.config.get("STREAM_RESTART_SECONDS", 900))
+    if interval <= 0:
+        return
+    threading.Thread(
+        target=stream_restart_loop,
+        args=(threading.Event(),),
+        name="stream-restart",
+        daemon=True,
+    ).start()
 
 
 @app.route("/")
@@ -628,4 +677,5 @@ if __name__ == "__main__":
         init_db()
         seed_feed_from_env()
         start_all_streams()
+    start_stream_restart_timer()
     app.run(host="0.0.0.0", port=8000, debug=False)
