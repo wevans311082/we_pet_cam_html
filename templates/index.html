@@ -84,24 +84,12 @@
   (() => {
     const csrfToken = "{{ csrf_token() }}";
     const reconnectEveryMs = 15 * 60 * 1000;
-    const stallReconnectMs = 12 * 1000;
-    const reconnectGapMs = 10 * 1000;
 
-    const reconnectFeed = (video, reason) => {
+    const startFeed = (video) => {
       const src = video.dataset.feedSrc;
       if (!src) {
         return;
       }
-      const now = Date.now();
-      if (
-        reason !== "timer" &&
-        video._kittenLastReconnect &&
-        now - video._kittenLastReconnect < reconnectGapMs
-      ) {
-        return;
-      }
-      video._kittenLastReconnect = now;
-      window.clearTimeout(video._kittenStallTimer);
       if (video._kittenHls) {
         video._kittenHls.destroy();
         video._kittenHls = null;
@@ -109,29 +97,18 @@
       video.pause();
       video.removeAttribute("src");
       video.load();
-      const fresh = `${src.split("?")[0]}?v=${now}`;
+      const fresh = `${src.split("?")[0]}?v=${Date.now()}`;
       const playNative = () => {
         video.src = fresh;
         video.play().catch(() => {});
       };
-      if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        playNative();
-        return;
-      }
       if (window.Hls && Hls.isSupported()) {
         const hls = new Hls({
           liveDurationInfinity: true,
+          startPosition: -1,
           liveSyncDurationCount: 3,
           maxLiveSyncPlaybackRate: 1.2,
           backBufferLength: 30,
-          xhrSetup: (xhr) => {
-            xhr.withCredentials = false;
-          },
-        });
-        hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (data && data.fatal) {
-            reconnectFeed(video, "error");
-          }
         });
         hls.loadSource(fresh);
         hls.attachMedia(video);
@@ -143,18 +120,7 @@
 
     const watchFeed = (video) => {
       video.crossOrigin = "anonymous";
-      video.addEventListener("waiting", () => {
-        window.clearTimeout(video._kittenStallTimer);
-        video._kittenStallTimer = window.setTimeout(() => {
-          if (video.readyState < 3) {
-            reconnectFeed(video, "stall");
-          }
-        }, stallReconnectMs);
-      });
-      video.addEventListener("playing", () => {
-        window.clearTimeout(video._kittenStallTimer);
-      });
-      reconnectFeed(video, "timer");
+      startFeed(video);
     };
 
     document.querySelectorAll("video[data-feed-src]").forEach(watchFeed);
@@ -354,7 +320,7 @@
       if (!video) {
         return;
       }
-      reconnectFeed(video, "timer");
+      startFeed(video);
     };
 
     const toggleBlueFilter = async (button, card) => {

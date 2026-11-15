@@ -14,6 +14,7 @@ from werkzeug.utils import secure_filename
 
 from flask import (
     Flask,
+    Response,
     abort,
     flash,
     g,
@@ -332,7 +333,7 @@ def _start_stream_locked(feed_id: int, rtsp_url: str) -> bool:
         "-hls_list_size",
         "6",
         "-hls_flags",
-        "delete_segments+append_list+omit_endlist+independent_segments",
+        "delete_segments+omit_endlist+independent_segments",
         "-hls_segment_filename",
         os.path.join(output_dir, "seg_%05d.ts"),
         os.path.join(output_dir, "index.m3u8"),
@@ -420,6 +421,75 @@ def serve_kitten_image(filename: str):
     return send_from_directory(kitten_upload_dir(), filename)
 
 
+_PLAYLIST_SEGMENT_TAGS = {
+    "#EXTINF",
+    "#EXT-X-BYTERANGE",
+    "#EXT-X-DISCONTINUITY",
+    "#EXT-X-PROGRAM-DATE-TIME",
+    "#EXT-X-KEY",
+    "#EXT-X-MAP",
+    "#EXT-X-GAP",
+}
+_SEGMENT_NUMBER = re.compile(r"seg_(\d+)\.ts\b", re.IGNORECASE)
+
+
+def playlist_without_missing_segments(directory: str, text: str) -> str | None:
+    """Drop playlist entries whose segment file has already been deleted.
+
+    ffmpeg can leave the first name in index.m3u8 after delete_segments
+    removes the file. Players then start on that 404 and never reach the
+    live edge. None means no playable segment is left.
+    """
+    output: list[str] = []
+    pending: list[str] = []
+    kept_any = False
+    saw_uri = False
+    first_sequence: int | None = None
+    media_sequence_index: int | None = None
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            tag = line.split(":", 1)[0].upper()
+            if tag in _PLAYLIST_SEGMENT_TAGS:
+                pending.append(line)
+            elif pending:
+                pending.append(line)
+            else:
+                output.append(line)
+                if tag == "#EXT-X-MEDIA-SEQUENCE":
+                    media_sequence_index = len(output) - 1
+            continue
+
+        saw_uri = True
+        name = line.split("?", 1)[0].split("#", 1)[0].replace("\\", "/")
+        name = os.path.basename(name)
+        path = os.path.join(directory, name)
+        if name and os.path.isfile(path):
+            if first_sequence is None:
+                match = _SEGMENT_NUMBER.search(name)
+                if match:
+                    first_sequence = int(match.group(1))
+            output.extend(pending)
+            output.append(line)
+            kept_any = True
+        pending = []
+
+    if not saw_uri or not kept_any:
+        return None
+
+    if first_sequence is not None:
+        sequence_line = f"#EXT-X-MEDIA-SEQUENCE:{first_sequence}"
+        if media_sequence_index is not None:
+            output[media_sequence_index] = sequence_line
+        else:
+            insert_at = 1 if output and output[0].upper().startswith("#EXTM3U") else 0
+            output.insert(insert_at, sequence_line)
+    return "\n".join(output) + "\n"
+
+
 @app.route("/hls/<stream_name>/<path:filename>")
 def serve_hls(stream_name: str, filename: str):
     if not stream_name.startswith("feed-"):
@@ -451,6 +521,21 @@ def serve_hls(stream_name: str, filename: str):
 
         if not os.path.exists(file_path):
             return "Stream is starting. Retry in a few seconds.", 503
+
+    if filename.endswith(".m3u8"):
+        try:
+            with open(file_path, encoding="utf-8", errors="replace") as handle:
+                raw_playlist = handle.read()
+        except OSError:
+            return "Stream is starting. Retry in a few seconds.", 503
+        cleaned = playlist_without_missing_segments(directory, raw_playlist)
+        if cleaned is None:
+            return "Stream is starting. Retry in a few seconds.", 503
+        return Response(
+            cleaned,
+            mimetype="application/vnd.apple.mpegurl",
+            headers={"Cache-Control": "no-cache, no-store"},
+        )
 
     return send_from_directory(directory, filename)
 

@@ -84,6 +84,8 @@ class SeedFeedTests(unittest.TestCase):
         self.assertIn('content="900"', viewer_body)
         self.assertIn("location.reload()", viewer_body)
         self.assertIn("liveDurationInfinity", viewer_body)
+        self.assertIn("startPosition: -1", viewer_body)
+        self.assertNotIn('reconnectFeed(video, "error")', viewer_body)
         self.assertNotIn("s3cret-test", viewer_body)
         self.assertNotIn(CAMERA_URL, viewer_body)
 
@@ -211,3 +213,70 @@ class SeedFeedTests(unittest.TestCase):
             kitten.stream_restart_loop(stop)
         restart.assert_called_once()
         kitten.app.config["STREAM_RESTART_SECONDS"] = 900
+
+    def test_playlist_omits_deleted_segments(self):
+        directory = Path(kitten.app.config["HLS_ROOT"]) / "feed-1"
+        directory.mkdir(parents=True)
+        (directory / "seg_00015.ts").write_bytes(b"alive")
+        (directory / "index.m3u8").write_text(
+            "\n".join(
+                [
+                    "#EXTM3U",
+                    "#EXT-X-VERSION:3",
+                    "#EXT-X-TARGETDURATION:17",
+                    "#EXT-X-MEDIA-SEQUENCE:10",
+                    "#EXTINF:16.666667,",
+                    "seg_00010.ts",
+                    "#EXT-X-DISCONTINUITY",
+                    "#EXTINF:16.666667,",
+                    "seg_00015.ts",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/hls/feed-1/index.m3u8")
+        body = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "application/vnd.apple.mpegurl")
+        self.assertNotIn("Content-Range", response.headers)
+        self.assertNotIn("seg_00010.ts", body)
+        self.assertIn("seg_00015.ts", body)
+        self.assertIn("#EXT-X-DISCONTINUITY", body)
+        self.assertIn("#EXT-X-MEDIA-SEQUENCE:15", body)
+
+        (directory / "seg_00015.ts").unlink()
+        missing = self.client.get("/hls/feed-1/index.m3u8")
+        self.assertEqual(missing.status_code, 503)
+        self.assertIn("starting", missing.get_data(as_text=True).lower())
+
+    def test_ffmpeg_replaces_the_playlist_instead_of_appending(self):
+        self._seed()
+        seen = {}
+
+        class FakeProc:
+            def __init__(self, cmd, **kwargs):
+                seen["cmd"] = cmd
+                self.stderr = io.BytesIO(b"")
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                return None
+
+        with patch("app.subprocess.Popen", FakeProc):
+            with kitten.app.app_context():
+                self.assertTrue(kitten.start_stream(1, CAMERA_URL))
+                kitten.stop_stream(1)
+        flags = seen["cmd"][seen["cmd"].index("-hls_flags") + 1]
+        self.assertNotIn("append_list", flags)
+        self.assertIn("delete_segments", flags)
+        self.assertIn("omit_endlist", flags)
