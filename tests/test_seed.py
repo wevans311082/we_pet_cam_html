@@ -1,10 +1,14 @@
 """Drive the shipped feed seeder, the viewer, and the admin mask."""
 
+import io
 import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,3 +118,42 @@ class SeedFeedTests(unittest.TestCase):
         self.assertIn("${KITTEN_SWARM_NODE}", text)
         self.assertIn("${KITTEN_WEB_IMAGE}", text)
         self.assertIn("${SEED_RTSP_URL}", text)
+        nginx_conf = (ROOT / "nginx" / "default.conf").read_text(encoding="utf-8")
+        self.assertIn("kittens_web:8000", nginx_conf)
+        self.assertNotIn("http://web:8000", nginx_conf)
+        self.assertIn("kitten_nginx_conf_v2", text)
+
+    def test_ffmpeg_stderr_masks_the_rtsp_password(self):
+        self._seed()
+        raw = b"Error opening input file rtsp://camuser:s3cret-test@10.0.20.40:554/stream1\n"
+
+        class FakeProc:
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+                if kwargs.get("stderr") is subprocess.PIPE:
+                    self.stderr = io.BytesIO(raw)
+                else:
+                    self.stderr = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                return None
+
+        with patch("app.subprocess.Popen", FakeProc):
+            with kitten.app.app_context():
+                with self.assertLogs(kitten.app.logger, level="WARNING") as captured:
+                    self.assertTrue(kitten.start_stream(1, CAMERA_URL))
+                    time.sleep(0.4)
+                    kitten.stop_stream(1)
+        joined = "\n".join(captured.output)
+        self.assertNotIn("s3cret-test", joined)
+        self.assertIn("camuser:***@", joined)
+        self.assertIn("10.0.20.40", joined)

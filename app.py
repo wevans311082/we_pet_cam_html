@@ -1,7 +1,9 @@
 import os
+import re
 import sqlite3
 import hmac
 import secrets
+import threading
 import time
 import shutil
 import subprocess
@@ -161,6 +163,14 @@ def validate_csrf_or_abort() -> None:
         abort(400, description="Invalid CSRF token")
 
 
+_RTSP_USERINFO = re.compile(r"(rtsp://[^:\s/@]+:)[^@\s]+@")
+
+
+def mask_ffmpeg_text(text: str) -> str:
+    """Hide RTSP userinfo in a log line. ffmpeg prints the input URL on failure."""
+    return _RTSP_USERINFO.sub(r"\1***@", text)
+
+
 def mask_rtsp_url(rtsp_url: str) -> str:
     parsed = urlparse(rtsp_url)
     if not parsed.username and not parsed.password:
@@ -255,6 +265,21 @@ def stop_stream(feed_id: int) -> None:
         proc.kill()
 
 
+def _drain_ffmpeg_stderr(proc: subprocess.Popen, feed_id: int) -> None:
+    stream = proc.stderr
+    if stream is None:
+        return
+    try:
+        for raw in stream:
+            text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+            text = text.rstrip()
+            if not text:
+                continue
+            app.logger.warning("ffmpeg %s: %s", stream_key(feed_id), mask_ffmpeg_text(text))
+    except Exception:
+        app.logger.exception("ffmpeg log drain failed for %s", stream_key(feed_id))
+
+
 def start_stream(feed_id: int, rtsp_url: str) -> bool:
     stop_stream(feed_id)
 
@@ -306,8 +331,18 @@ def start_stream(feed_id: int, rtsp_url: str) -> bool:
     ])
 
     try:
-        proc = subprocess.Popen(ffmpeg_cmd)
+        proc = subprocess.Popen(
+            ffmpeg_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
         STREAM_PROCESSES[feed_id] = proc
+        threading.Thread(
+            target=_drain_ffmpeg_stderr,
+            args=(proc, feed_id),
+            name=f"ffmpeg-{stream_key(feed_id)}",
+            daemon=True,
+        ).start()
         app.logger.info("Started ffmpeg worker for %s", stream_key(feed_id))
         return True
     except OSError:
