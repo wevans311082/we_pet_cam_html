@@ -6,6 +6,7 @@
     <title>{% block title %}Kitten Cam{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    {% block extra_head %}{% endblock %}
   </head>
   <body class="{% block body_class %}{% endblock %}">
     {% block topbar %}
